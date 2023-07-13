@@ -15,16 +15,17 @@ namespace AdcreativeAI.ImageDownloader
         private static string SavePath = "";
 
         private static int _totalDownloaded;
-
         static void Main()
         {
             DelegateProgressBar progressBarEventHandler = null;
 
             progressBarEventHandler += UpdateProgressBar;
             Console.CancelKeyPress += Console_CancelKeyPress;
-
-
+            
             _inputModel = ReadInputFromJson();
+
+            SemaphoreSlim throttler = new SemaphoreSlim(_inputModel.MaximumConcurrency);
+
 
             SavePath = $"{Environment.CurrentDirectory}\\{_inputModel.SavePath}";
 
@@ -35,7 +36,7 @@ namespace AdcreativeAI.ImageDownloader
 
             CheckDirectoryRequirement(SavePath);
 
-            DownloadImages(progressBarEventHandler);
+            DownloadImages(progressBarEventHandler, throttler);
 
             progressBarEventHandler -= UpdateProgressBar;
 
@@ -92,57 +93,56 @@ namespace AdcreativeAI.ImageDownloader
 
         }
 
-        private static async Task DownloadImages(DelegateProgressBar progressBarEventHandler)
+        private static async Task DownloadImages(DelegateProgressBar progressBarEventHandler,
+            SemaphoreSlim throttler)
         {
 
-            using (var throttler = new SemaphoreSlim(_inputModel.MaximumConcurrency))
+            for (int i = 0; i < _inputModel.Count; i++)
             {
-                for (int i = 0; i < _inputModel.Count; i++)
+                await throttler.WaitAsync(_cancellationToken.Token);
+
+                int currentIndex = i + 1;
+
+                if (_cancellationToken.Token.IsCancellationRequested)
                 {
-                   await throttler.WaitAsync(_cancellationToken.Token);
-
-                    int currentIndex = i + 1;
-
-                    if (_cancellationToken.Token.IsCancellationRequested)
-                    {
-                        break;
-                    }
-                    ThreadPool.QueueUserWorkItem(state =>
-                    {
-                        try
-                        {
-                            using (WebClient client = new WebClient())
-                            {
-                                client.DownloadFile(_inputModel.DownloadUrl,
-                                    Path.Combine(SavePath, $"{currentIndex}.png"));
-                            }
-
-                            lock (_lockObject)
-                            {
-                                _totalDownloaded++;
-                                progressBarEventHandler();
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Error downloading image {currentIndex}: {ex.Message}");
-                        }
-                        finally
-                        {
-                            if (throttler.CurrentCount == 0)
-                                throttler.Release();
-                        }
-                    }, null);
-
-                   
+                    break;
                 }
+                ThreadPool.QueueUserWorkItem(state =>
+                {
+                    try
+                    {
+                        using (WebClient client = new WebClient())
+                        {
+                            client.DownloadFile(_inputModel.DownloadUrl,
+                                Path.Combine(SavePath, $"{currentIndex}.png"));
+                        }
 
-                throttler.Wait(1000);
+                        lock (_lockObject)
+                        {
+                            _totalDownloaded++;
+                            progressBarEventHandler();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error downloading image {currentIndex}: {ex.Message}");
+                    }
+                    finally
+                    {
+                        if (throttler.CurrentCount == 0)
+                            throttler.Release();
+                    }
+                }, null);
 
-                throttler.Release(_inputModel.MaximumConcurrency);
 
             }
+
+            throttler.Wait(1000);
+
+            throttler.Release(_inputModel.MaximumConcurrency);
+
         }
+
 
         static void UpdateProgressBar()
         {
