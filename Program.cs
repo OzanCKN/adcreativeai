@@ -5,33 +5,40 @@ namespace AdcreativeAI.ImageDownloader
 {
     class Program
     {
-        private static InputModel _inputModel;
         delegate void DelegateProgressBar();
-        private static CancellationTokenSource cancellationTokenSource;
 
-        private static int totalDownloaded;
-        private static object lockObject = new object();
+        private static InputModel _inputModel;
+        private static CancellationTokenSource _cancellationToken;
+
+        private static object _lockObject = new object();
+
+        private static string SavePath = "";
+
+        private static int _totalDownloaded;
 
         static void Main()
         {
             DelegateProgressBar progressBarEventHandler = null;
+
             progressBarEventHandler += UpdateProgressBar;
             Console.CancelKeyPress += Console_CancelKeyPress;
 
-            _inputModel = ReadInputFromJson();
-            string savePath = $"{Environment.CurrentDirectory}\\{_inputModel.SavePath}";
 
-            totalDownloaded = 0;
-            cancellationTokenSource = new CancellationTokenSource();
+            _inputModel = ReadInputFromJson();
+
+            SavePath = $"{Environment.CurrentDirectory}\\{_inputModel.SavePath}";
+
+            _totalDownloaded = 0;
+            _cancellationToken = new CancellationTokenSource();
 
             Console.WriteLine($"Downloading {_inputModel.Count} images ({_inputModel.MaximumConcurrency}) parallel downloads at most");
 
-            CheckDirectoryRequirement(savePath);
+            CheckDirectoryRequirement(SavePath);
 
-            DownloadImages(savePath, progressBarEventHandler);
+            DownloadImages(progressBarEventHandler);
 
             progressBarEventHandler -= UpdateProgressBar;
-            Console.CancelKeyPress -= Console_CancelKeyPress;
+
 
             Console.ReadKey();
         }
@@ -47,8 +54,8 @@ namespace AdcreativeAI.ImageDownloader
         private static void Console_CancelKeyPress(object sender, ConsoleCancelEventArgs e)
         {
             e.Cancel = true;
-            cancellationTokenSource.Cancel();
-            Console.WriteLine("Operation cancelled");
+            _cancellationToken.Cancel();
+            CleanupDownloadedImages(SavePath);
 
             Environment.Exit(0);
         }
@@ -77,20 +84,29 @@ namespace AdcreativeAI.ImageDownloader
             Console.WriteLine($"Enter the maximum parallel download limit:");
             _inputModel.MaximumConcurrency = Convert.ToInt32(Console.ReadLine());
 
+            _inputModel.DownloadUrl = "https://picsum.photos/200/300?random=1";
+
+            _inputModel.SavePath = "outputs";
 
             return _inputModel;
 
         }
 
-        private static void DownloadImages(string savePath, DelegateProgressBar progressBarEventHandler)
+        private static async Task DownloadImages(DelegateProgressBar progressBarEventHandler)
         {
 
             using (var throttler = new SemaphoreSlim(_inputModel.MaximumConcurrency))
             {
                 for (int i = 0; i < _inputModel.Count; i++)
                 {
-                    throttler.Wait(cancellationTokenSource.Token);
+                   await throttler.WaitAsync(_cancellationToken.Token);
+
                     int currentIndex = i + 1;
+
+                    if (_cancellationToken.Token.IsCancellationRequested)
+                    {
+                        break;
+                    }
                     ThreadPool.QueueUserWorkItem(state =>
                     {
                         try
@@ -98,12 +114,12 @@ namespace AdcreativeAI.ImageDownloader
                             using (WebClient client = new WebClient())
                             {
                                 client.DownloadFile(_inputModel.DownloadUrl,
-                                    Path.Combine(savePath, $"{currentIndex}.png"));
+                                    Path.Combine(SavePath, $"{currentIndex}.png"));
                             }
 
-                            lock (lockObject)
+                            lock (_lockObject)
                             {
-                                totalDownloaded++;
+                                _totalDownloaded++;
                                 progressBarEventHandler();
                             }
                         }
@@ -118,10 +134,7 @@ namespace AdcreativeAI.ImageDownloader
                         }
                     }, null);
 
-                    if (cancellationTokenSource.Token.IsCancellationRequested)
-                    {
-                        break;
-                    }
+                   
                 }
 
                 throttler.Wait(1000);
@@ -133,10 +146,24 @@ namespace AdcreativeAI.ImageDownloader
 
         static void UpdateProgressBar()
         {
-            lock (lockObject)
+            lock (_lockObject)
             {
                 Console.SetCursorPosition(0, Console.CursorTop);
-                Console.Write($"Progress: {totalDownloaded}\\{_inputModel.Count}");
+                Console.Write($"Progress: {_totalDownloaded}\\{_inputModel.Count}");
+            }
+        }
+
+        private static void CleanupDownloadedImages(string path)
+        {
+            lock (_lockObject)
+            {
+                Thread.Sleep(1000);
+                string[] files = Directory.GetFiles(path);
+
+                foreach (string file in files)
+                {
+                    File.Delete(file);
+                }
             }
         }
 
